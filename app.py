@@ -672,7 +672,7 @@ if not BIOPYTHON_OK:
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS PRINCIPALES
 # ══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "📂 Carga de Secuencias",
     "🔗 Alineamiento Múltiple",
     "🔍 Mutaciones Conservadas",
@@ -681,6 +681,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 Dashboard & Exportación",
     "🌐 Buscar en NCBI/GenBank",
     "⚡ Pipeline Automático + PDF",
+    "🔎 Identificar Virus (BLAST)",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2756,14 +2757,413 @@ with tab8:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TAB 9 · IDENTIFICAR VIRUS CON BLAST
+# ══════════════════════════════════════════════════════════════════════════════
+with tab9:
+    st.markdown("## 🔎 Identificar Virus (BLAST)")
+    st.markdown("""
+    Pega una secuencia desconocida y la app la enviará a **NCBI BLAST** para identificar 
+    a qué virus pertenece, con porcentaje de similitud y links directos a GenBank.
+    """)
+
+    if not BIOPYTHON_OK:
+        st.error("BioPython es necesario. Instala: `pip install biopython`")
+        st.stop()
+
+    from Bio import Entrez
+    from Bio.Blast import NCBIWWW, NCBIXML
+
+    # ── Configuración ─────────────────────────────────────────────────────────
+    with st.expander("⚙️ Configuración (email NCBI)", expanded=False):
+        blast_email = st.text_input(
+            "📧 Tu email (recomendado por NCBI)",
+            placeholder="investigador@universidad.edu",
+            key="blast_email"
+        )
+        if blast_email:
+            Entrez.email = blast_email
+
+    st.markdown("---")
+
+    # ── Entrada de secuencia ──────────────────────────────────────────────────
+    st.markdown("### 🧬 Secuencia a identificar")
+
+    col_input, col_opts = st.columns([2, 1])
+
+    with col_input:
+        input_mode = st.radio(
+            "Fuente de la secuencia",
+            ["✏️ Pegar secuencia", "📋 Usar secuencia ya cargada"],
+            horizontal=True, key="blast_input_mode"
+        )
+
+        if "✏️" in input_mode:
+            blast_seq_raw = st.text_area(
+                "Pega tu secuencia aquí (con o sin cabecera FASTA)",
+                height=200,
+                placeholder=""">Mi_secuencia_desconocida
+ATGGAGAGCCTTGTCCCTGGTTTCAACGAGAAAACACACGTCCAACTCAGT
+TTGCCTGTTTTACAGGTTCGCGACGTGCTTCGCGATCGTTTGAGTTTTAGT
+GAGATCGTTGAGCGGTTGATGGCTTATTTCTTTTGCGGCAATGAAACGACT""",
+                key="blast_seq_input"
+            )
+        else:
+            if not st.session_state.records:
+                st.warning("No hay secuencias cargadas. Ve a 📂 Carga de Secuencias primero.")
+                blast_seq_raw = ""
+            else:
+                selected_blast = st.selectbox(
+                    "Selecciona la secuencia",
+                    [r.id for r in st.session_state.records],
+                    key="blast_seq_select"
+                )
+                sel_rec = next(r for r in st.session_state.records if r.id == selected_blast)
+                blast_seq_raw = f">{sel_rec.id}\n{str(sel_rec.seq)}"
+                st.code(blast_seq_raw[:200] + ("..." if len(blast_seq_raw) > 200 else ""),
+                        language=None)
+
+    with col_opts:
+        st.markdown("### ⚙️ Opciones BLAST")
+        blast_program = st.selectbox(
+            "Programa",
+            ["blastn", "blastx", "blastp"],
+            help="blastn = nucleótido vs nucleótido\nblastx = nucleótido traducido vs proteína\nblatp = proteína vs proteína"
+        )
+        blast_db = st.selectbox(
+            "Base de datos",
+            ["nt", "nr", "refseq_rna", "refseq_protein"],
+            help="nt = todas las secuencias nucleotídicas\nrefseq_rna = ARN de referencia"
+        )
+        blast_hitlist = st.slider("Número de resultados", 5, 50, 15)
+        blast_entrez_query = st.text_input(
+            "Filtrar organismos (opcional)",
+            placeholder='Viruses[Organism]',
+            help="Limita la búsqueda a virus únicamente para resultados más relevantes"
+        )
+
+        st.markdown("---")
+        st.info("""
+        ⏱️ **BLAST tarda 30-120 segundos** dependiendo de la longitud de la secuencia 
+        y la carga de los servidores de NCBI. 
+        
+        No cierres la app mientras esperas.
+        """)
+
+    # ── Botón BLAST ───────────────────────────────────────────────────────────
+    run_blast = st.button("🚀 Enviar a BLAST e identificar virus",
+                          type="primary", use_container_width=False, key="run_blast")
+
+    if run_blast:
+        # Limpiar y validar secuencia
+        seq_clean = ""
+        if blast_seq_raw.strip():
+            lines = blast_seq_raw.strip().splitlines()
+            seq_lines = [l for l in lines if not l.startswith(">")]
+            seq_clean = "".join(seq_lines).strip().upper()
+            seq_clean = "".join(c for c in seq_clean if c in "ACGTUNRYSWKMBDHV-")
+
+        if len(seq_clean) < 20:
+            st.error("⚠️ La secuencia es demasiado corta o inválida. Mínimo 20 nucleótidos.")
+        elif len(seq_clean) > 100000:
+            st.error("⚠️ La secuencia es demasiado larga (máx. 100,000 bp para BLAST online).")
+        else:
+            st.info(f"📡 Enviando secuencia de **{len(seq_clean)} bp** a NCBI BLAST... "
+                    f"Esto puede tardar hasta 2 minutos.")
+
+            progress = st.progress(0)
+            status_text = st.empty()
+
+            try:
+                status_text.markdown("⏳ Conectando con NCBI BLAST...")
+                progress.progress(10)
+
+                # Construir query
+                entrez_filter = blast_entrez_query.strip() if blast_entrez_query.strip() else "Viruses[Organism]"
+
+                # Lanzar BLAST
+                result_handle = NCBIWWW.qblast(
+                    program=blast_program,
+                    database=blast_db,
+                    sequence=seq_clean,
+                    hitlist_size=blast_hitlist,
+                    entrez_query=entrez_filter,
+                    format_type="XML",
+                )
+
+                progress.progress(70)
+                status_text.markdown("✅ Resultados recibidos. Procesando...")
+
+                # Parsear XML
+                blast_records = list(NCBIXML.parse(result_handle))
+                progress.progress(90)
+
+                if not blast_records or not blast_records[0].alignments:
+                    st.warning("""
+                    ⚠️ No se encontraron hits significativos.
+                    
+                    Posibles causas:
+                    - La secuencia no es de un virus conocido
+                    - El filtro de organismo es demasiado restrictivo (prueba quitar el filtro)
+                    - La secuencia tiene demasiadas bases ambiguas (N)
+                    """)
+                else:
+                    blast_record = blast_records[0]
+                    hits = blast_record.alignments
+
+                    progress.progress(100)
+                    status_text.empty()
+
+                    st.success(f"✅ **{len(hits)} hits** encontrados para tu secuencia.")
+
+                    # ── Tabla de resultados ───────────────────────────────────
+                    st.markdown("---")
+                    st.markdown(f"### 🦠 Identificación — Top {len(hits)} resultados")
+
+                    rows = []
+                    for i, alignment in enumerate(hits):
+                        hsp = alignment.hsps[0]  # mejor HSP
+
+                        # Extraer accession e ID limpio
+                        title = alignment.title
+                        acc = title.split("|")[1] if "|" in title else title.split()[0]
+                        desc = " ".join(title.split()[1:])[:80] if " " in title else title[:80]
+
+                        identity_pct = round(hsp.identities / hsp.align_length * 100, 1)
+                        coverage_pct = round(hsp.align_length / len(seq_clean) * 100, 1)
+
+                        rows.append({
+                            "#": i + 1,
+                            "Accession": acc,
+                            "Organismo / Descripción": desc,
+                            "Identidad (%)": identity_pct,
+                            "Cobertura (%)": min(coverage_pct, 100.0),
+                            "Score": hsp.score,
+                            "E-value": f"{hsp.expect:.2e}",
+                            "Gaps": hsp.gaps,
+                        })
+
+                    results_df = pd.DataFrame(rows)
+
+                    # Colorear por identidad
+                    def color_identity(val):
+                        if val >= 95:
+                            return "background-color: #dcfce7; color: #166534; font-weight:700"
+                        elif val >= 80:
+                            return "background-color: #fef9c3; color: #854d0e; font-weight:600"
+                        else:
+                            return "background-color: #fee2e2; color: #991b1b"
+
+                    st.dataframe(
+                        results_df.style.applymap(color_identity, subset=["Identidad (%)"]),
+                        use_container_width=True, hide_index=True
+                    )
+
+                    # ── Interpretación automática ─────────────────────────────
+                    st.markdown("---")
+                    st.markdown("### 🧠 Interpretación automática")
+
+                    top = rows[0]
+                    top_identity = top["Identidad (%)"]
+                    top_desc = top["Organismo / Descripción"]
+                    top_acc = top["Accession"]
+                    top_evalue = top["E-value"]
+
+                    if top_identity >= 97:
+                        verdict_icon = "🟢"
+                        verdict = "**Identificación muy fiable**"
+                        verdict_detail = f"La secuencia es casi idéntica a `{top_desc}` con un {top_identity}% de identidad."
+                    elif top_identity >= 85:
+                        verdict_icon = "🟡"
+                        verdict = "**Identificación probable**"
+                        verdict_detail = f"La secuencia es muy similar a `{top_desc}` ({top_identity}% identidad). Podría ser una variante o cepa diferente."
+                    elif top_identity >= 70:
+                        verdict_icon = "🟠"
+                        verdict = "**Posible relación lejana**"
+                        verdict_detail = f"La secuencia tiene similitud moderada ({top_identity}%) con `{top_desc}`. Podría ser un virus relacionado o una región conservada."
+                    else:
+                        verdict_icon = "🔴"
+                        verdict = "**Identificación incierta**"
+                        verdict_detail = f"Baja similitud ({top_identity}%) con cualquier secuencia conocida. La secuencia podría ser novedosa, estar muy degradada, o no ser viral."
+
+                    st.markdown(f"""
+                    <div style="background:#f0f9ff; border-left:4px solid #2563eb; 
+                                border-radius:8px; padding:20px; margin:10px 0">
+                        <h3 style="margin:0 0 8px 0; color:#1e293b">{verdict_icon} {verdict}</h3>
+                        <p style="color:#374151; margin:0 0 12px 0; font-size:1.05rem">{verdict_detail}</p>
+                        <table style="width:100%; border-collapse:collapse">
+                            <tr>
+                                <td style="padding:4px 12px 4px 0; color:#64748b; font-weight:500">Mejor match:</td>
+                                <td style="color:#1e293b; font-weight:600">{top_desc}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding:4px 12px 4px 0; color:#64748b; font-weight:500">Accession:</td>
+                                <td><a href="https://www.ncbi.nlm.nih.gov/nucleotide/{top_acc}" 
+                                       target="_blank" style="color:#2563eb">{top_acc} ↗</a></td>
+                            </tr>
+                            <tr>
+                                <td style="padding:4px 12px 4px 0; color:#64748b; font-weight:500">Identidad:</td>
+                                <td style="color:#1e293b; font-weight:600">{top_identity}%</td>
+                            </tr>
+                            <tr>
+                                <td style="padding:4px 12px 4px 0; color:#64748b; font-weight:500">E-value:</td>
+                                <td style="color:#1e293b">{top_evalue}</td>
+                            </tr>
+                        </table>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # ── Gráfico de barras de identidad ────────────────────────
+                    if PLOTLY_OK and len(rows) > 1:
+                        st.markdown("### 📊 Comparativa de identidad con los mejores hits")
+
+                        # Acortar descripciones para el gráfico
+                        labels = [r["Organismo / Descripción"][:45] + "..." 
+                                  if len(r["Organismo / Descripción"]) > 45 
+                                  else r["Organismo / Descripción"] 
+                                  for r in rows]
+                        identities = [r["Identidad (%)"] for r in rows]
+                        bar_colors = [
+                            "#16a34a" if v >= 95 else "#ca8a04" if v >= 80 else "#dc2626"
+                            for v in identities
+                        ]
+
+                        fig_blast = go.Figure(go.Bar(
+                            x=identities,
+                            y=labels,
+                            orientation="h",
+                            marker_color=bar_colors,
+                            text=[f"{v}%" for v in identities],
+                            textposition="outside",
+                            textfont=dict(size=10, color="#1e293b"),
+                        ))
+                        fig_blast.add_vline(x=95, line_dash="dot",
+                                            line_color="#16a34a",
+                                            annotation_text="95% (muy fiable)",
+                                            annotation_font_color="#16a34a")
+                        fig_blast.add_vline(x=80, line_dash="dot",
+                                            line_color="#ca8a04",
+                                            annotation_text="80%",
+                                            annotation_font_color="#ca8a04")
+                        fig_blast.update_layout(
+                            paper_bgcolor="#ffffff", plot_bgcolor="#f8fafc",
+                            font=dict(color="#1e293b"),
+                            xaxis=dict(title="Identidad (%)", range=[0, 105],
+                                       gridcolor="#e2e8f0"),
+                            yaxis=dict(autorange="reversed"),
+                            height=max(350, len(rows) * 38 + 100),
+                            margin=dict(l=20, r=80, t=30, b=40),
+                            title=dict(text="Porcentaje de identidad con secuencias conocidas",
+                                       font=dict(color="#1d4ed8")),
+                        )
+                        st.plotly_chart(fig_blast, use_container_width=True)
+
+                    # ── Leyenda de colores ────────────────────────────────────
+                    st.markdown("""
+                    <div style="display:flex; gap:20px; margin-top:8px; flex-wrap:wrap">
+                        <span style="background:#dcfce7;color:#166534;padding:4px 10px;
+                                     border-radius:6px;font-weight:600;font-size:0.85rem">
+                            🟢 ≥95% Identificación muy fiable
+                        </span>
+                        <span style="background:#fef9c3;color:#854d0e;padding:4px 10px;
+                                     border-radius:6px;font-weight:600;font-size:0.85rem">
+                            🟡 80–94% Identificación probable
+                        </span>
+                        <span style="background:#fee2e2;color:#991b1b;padding:4px 10px;
+                                     border-radius:6px;font-weight:600;font-size:0.85rem">
+                            🔴 &lt;80% Identificación incierta
+                        </span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # ── Opciones post-identificación ──────────────────────────
+                    st.markdown("---")
+                    st.markdown("### ➡️ ¿Qué quieres hacer con esta secuencia?")
+
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        if st.button("📥 Añadir al análisis principal", key="blast_to_main"):
+                            if blast_seq_raw.strip():
+                                new_recs = parse_fasta_text(
+                                    blast_seq_raw if blast_seq_raw.startswith(">")
+                                    else f">Secuencia_BLAST\n{seq_clean}"
+                                )
+                                if new_recs:
+                                    st.session_state.records.extend(new_recs)
+                                    st.success("✅ Añadida. Ve a 📂 Carga de Secuencias para verla.")
+                    with col_b:
+                        st.download_button(
+                            "💾 Descargar resultados (CSV)",
+                            data=df_to_csv_bytes(results_df),
+                            file_name="blast_resultados.csv",
+                            mime="text/csv",
+                            key="dl_blast_csv"
+                        )
+                    with col_c:
+                        # Link a BLAST online con la misma búsqueda
+                        st.markdown(f"""
+                        <a href="https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi?PROGRAM={blast_program}&PAGE_TYPE=BlastSearch&DATABASE={blast_db}" 
+                           target="_blank">
+                            <button style="background:#2563eb;color:white;border:none;
+                                           border-radius:8px;padding:8px 16px;
+                                           font-weight:600;cursor:pointer;width:100%">
+                                🌐 Abrir en NCBI BLAST
+                            </button>
+                        </a>
+                        """, unsafe_allow_html=True)
+
+            except Exception as e:
+                progress.empty()
+                status_text.empty()
+                st.error(f"❌ Error conectando con NCBI BLAST: {e}")
+                st.markdown("""
+                **Posibles causas:**
+                - Sin conexión a internet
+                - Servidores de NCBI temporalmente caídos
+                - Secuencia con caracteres inválidos
+                
+                Puedes usar BLAST directamente en: https://blast.ncbi.nlm.nih.gov
+                """)
+
+    # ── Guía de interpretación ────────────────────────────────────────────────
+    with st.expander("📖 Guía de interpretación de resultados BLAST"):
+        st.markdown("""
+        ### ¿Cómo leer los resultados?
+
+        | Campo | Significado |
+        |-------|-------------|
+        | **Identidad (%)** | Porcentaje de bases idénticas entre tu secuencia y el hit |
+        | **Cobertura (%)** | Qué porcentaje de tu secuencia está cubierto por el hit |
+        | **E-value** | Probabilidad de que el hit sea por azar. Cuanto más pequeño (ej. `1e-50`), más significativo |
+        | **Score** | Puntuación de la alineación. Mayor score = mejor alineamiento |
+
+        ### Guía rápida de identidad
+        - **≥ 99%** → Misma cepa o muy cercana
+        - **95–99%** → Misma especie viral, diferente aislado
+        - **85–95%** → Misma especie, diferente linaje/variante
+        - **70–85%** → Virus relacionado (mismo género)
+        - **< 70%** → Relación lejana o secuencia problemática
+
+        ### ¿Por qué usar `Viruses[Organism]` como filtro?
+        Sin filtro, BLAST puede devolver hits de bacterias, humanos u otros organismos 
+        que también contienen secuencias similares. El filtro `Viruses[Organism]` 
+        restringe los resultados solo a secuencias virales.
+
+        ### Programas BLAST
+        - **blastn** → Para secuencias de DNA/RNA viral (lo más habitual)
+        - **blastx** → Traduce tu secuencia nucleotídica y busca en proteínas (útil para regiones conservadas)
+        - **blastp** → Si tienes directamente una secuencia de aminoácidos
+        """)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FOOTER
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
 st.markdown("""
 <div style="text-align:center; color:#64748b; font-size:0.85rem; padding: 10px 0">
     🧬 <strong>ViroSeq Analyzer</strong> · Herramienta de bioinformática para virología
-    · Desarrollada con <a href="https://streamlit.io" style="color:#58a6ff">Streamlit</a> 
-    + <a href="https://biopython.org" style="color:#58a6ff">BioPython</a> 
-    + <a href="https://plotly.com" style="color:#58a6ff">Plotly</a>
+    · Desarrollada con <a href="https://streamlit.io" style="color:#2563eb">Streamlit</a> 
+    + <a href="https://biopython.org" style="color:#2563eb">BioPython</a> 
+    + <a href="https://plotly.com" style="color:#2563eb">Plotly</a>
 </div>
 """, unsafe_allow_html=True)
